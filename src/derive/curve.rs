@@ -150,6 +150,7 @@ macro_rules! new_curve_impl {
     $base:ident,
     $scalar:ident,
     $generator:expr,
+    $constant_a:expr,
     $constant_b:expr,
     $curve_id:literal,
     ) => {
@@ -181,8 +182,28 @@ macro_rules! new_curve_impl {
                 }
             }
 
+            const fn curve_constant_a() -> $base {
+                $name_affine::curve_constant_a()
+            }
+
             const fn curve_constant_b() -> $base {
                 $name_affine::curve_constant_b()
+            }
+
+            #[inline]
+            fn curve_constant_3b() -> $base {
+                lazy_static::lazy_static! {
+                        static ref CONST_3B: $base = $constant_b + $constant_b + $constant_b;
+                }
+                *CONST_3B
+            }
+
+            fn mul_by_3b(input: &$base) -> $base {
+                if $name::CURVE_ID == "bn256"{
+                    input.double().double().double() + input
+                } else {
+                    input * $name::curve_constant_3b()
+                }
             }
         }
 
@@ -192,6 +213,10 @@ macro_rules! new_curve_impl {
                     x: $generator.0,
                     y: $generator.1,
                 }
+            }
+
+            const fn curve_constant_a() -> $base {
+                $constant_a
             }
 
             const fn curve_constant_b() -> $base {
@@ -204,7 +229,7 @@ macro_rules! new_curve_impl {
                     let ysign = (rng.next_u32() % 2) as u8;
 
                     let x3 = x.square() * x;
-                    let y = (x3 + $name::curve_constant_b()).sqrt();
+                    let y = (x3 + $name::curve_constant_a() * x + $name::curve_constant_b()).sqrt();
                     if let Some(y) = Option::<$base>::from(y) {
                         let sign = y.to_bytes()[0] & 1;
                         let y = if ysign ^ sign == 0 { y } else { -y };
@@ -272,16 +297,13 @@ macro_rules! new_curve_impl {
 
         impl subtle::ConstantTimeEq for $name {
             fn ct_eq(&self, other: &Self) -> Choice {
-                // Is (xz^2, yz^3, z) equal to (x'z'^2, yz'^3, z') when converted to affine?
-
-                let z = other.z.square();
-                let x1 = self.x * z;
-                let z = z * other.z;
-                let y1 = self.y * z;
-                let z = self.z.square();
-                let x2 = other.x * z;
-                let z = z * self.z;
-                let y2 = other.y * z;
+                // Is (x, y, z) equal to (x', y, z') when converted to affine?	
+                // => (x/z , y/z) equal to (x'/z' , y'/z')	
+                // => (xz' == x'z) & (yz' == y'z)	
+                let x1 = self.x * other.z;	
+                let y1 = self.y * other.z;	
+                let x2 = other.x * self.z;	
+                let y2 = other.y * self.z;
 
                 let self_is_zero = self.is_identity();
                 let other_is_zero = other.is_identity();
@@ -324,7 +346,10 @@ macro_rules! new_curve_impl {
             }
 
             fn jacobian_coordinates(&self) -> ($base, $base, $base) {
-               (self.x, self.y, self.z)
+                // Homogenous to Jacobian	
+                let x = self.x * self.z;	
+                let y = self.y * self.z.square();	
+                (x, y, self.z)
             }
 
 
@@ -333,12 +358,8 @@ macro_rules! new_curve_impl {
             }
 
             fn is_on_curve(&self) -> Choice {
-
-                let z2 = self.z.square();
-                let z4 = z2.square();
-                let z6 = z4 * z2;
-                (self.y.square() - self.x.square() * self.x)
-                    .ct_eq(&(z6 * $name::curve_constant_b()))
+                (self.z * self.y.square()  - self.x.square() * self.x - $name::curve_constant_a() * self.x * self.z.square())
+                    .ct_eq(&(self.z.square() * self.z * $name::curve_constant_b()))
                     | self.z.is_zero()
             }
 
@@ -347,11 +368,19 @@ macro_rules! new_curve_impl {
             }
 
             fn a() -> Self::Base {
-                Self::Base::zero()
+                $name::curve_constant_a()
             }
 
             fn new_jacobian(x: Self::Base, y: Self::Base, z: Self::Base) -> CtOption<Self> {
-                let p = $name { x, y, z };
+                // Jacobian to homogenous	
+                let z_inv = z.invert().unwrap_or($base::zero());	
+                let p_x = x * z_inv;	
+                let p_y = y * z_inv.square();	
+                let p = $name {	
+                    x:p_x,	
+                    y:$base::conditional_select(&p_y, &$base::one(), z.is_zero()),	
+                    z	
+                };
                 CtOption::new(p, p.is_on_curve())
             }
         }
@@ -386,23 +415,17 @@ macro_rules! new_curve_impl {
                     // Cancel out z-coordinate in denominator of `acc`
                     acc = $base::conditional_select(&(acc * p.z), &acc, skip);
 
-                    // Set the coordinates to the correct value
-                    let tmp2 = tmp.square();
-                    let tmp3 = tmp2 * tmp;
-
-                    q.x = p.x * tmp2;
-                    q.y = p.y * tmp3;
+                    q.x = p.x * tmp;	
+                    q.y = p.y * tmp;
 
                     *q = $name_affine::conditional_select(&q, &$name_affine::identity(), skip);
                 }
             }
 
             fn to_affine(&self) -> Self::AffineRepr {
-                let zinv = self.z.invert().unwrap_or($base::zero());
-                let zinv2 = zinv.square();
-                let x = self.x * zinv2;
-                let zinv3 = zinv2 * zinv;
-                let y = self.y * zinv3;
+                let zinv = self.z.invert().unwrap_or($base::zero());	
+                let x = self.x * zinv;	
+                let y = self.y * zinv;
 
                 let tmp = $name_affine {
                     x,
@@ -421,22 +444,38 @@ macro_rules! new_curve_impl {
             }
 
             fn double(&self) -> Self {
-                let a = self.x.square();
-                let b = self.y.square();
-                let c = b.square();
-                let d = self.x + b;
-                let d = d.square();
-                let d = d - a - c;
-                let d = d + d;
-                let e = a + a + a;
-                let f = e.square();
-                let z3 = self.z * self.y;
+                 // Algorithm 3, https://eprint.iacr.org/2015/1060.pdf
+                let t0 = self.x.square();
+                let t1 = self.y.square();
+                let t2 = self.z.square();
+                let t3 = self.x * self.y;
+                let t3 = t3 + t3;
+                let z3 = self.x * self.z;
                 let z3 = z3 + z3;
-                let x3 = f - (d + d);
-                let c = c + c;
-                let c = c + c;
-                let c = c + c;
-                let y3 = e * (d - x3) - c;
+                let x3 = $name::curve_constant_a() * z3;
+                let y3 = $name::mul_by_3b(&t2);
+                let y3 = x3 + y3;
+                let x3 = t1 - y3;
+                let y3 = t1 + y3;
+                let y3 = x3 * y3;
+                let x3 = t3 * x3;
+                let z3 = $name::mul_by_3b(&z3);
+                let t2 = $name::curve_constant_a() * t2;
+                let t3 = t0 - t2;
+                let t3 = $name::curve_constant_a() * t3;
+                let t3 = t3 + z3;
+                let z3 = t0 + t0;
+                let t0 = z3 + t0;
+                let t0 = t0 + t2;
+                let t0 = t0 * t3;
+                let y3 = y3 + t0;
+                let t2 = self.y * self.z;
+                let t2 = t2 + t2;
+                let t0 = t2 * t3;
+                let x3 = x3 - t0;
+                let z3 = t2 * t1;
+                let z3 = z3 + z3;
+                let z3 = z3 + z3;
 
                 let tmp = $name {
                     x: x3,
@@ -454,7 +493,7 @@ macro_rules! new_curve_impl {
             fn identity() -> Self {
                 Self {
                     x: $base::zero(),
-                    y: $base::zero(),
+                    y: $base::one(),
                     z: $base::zero(),
                 }
             }
@@ -612,7 +651,7 @@ macro_rules! new_curve_impl {
                 $base::from_bytes(&xbytes).and_then(|x| {
                     CtOption::new(Self::identity(), x.is_zero() & (!ysign)).or_else(|| {
                         let x3 = x.square() * x;
-                        (x3 + $name::curve_constant_b()).sqrt().and_then(|y| {
+                        (x3 + $name::curve_constant_a() * x + $name::curve_constant_b()).sqrt().and_then(|y| {
                             let sign = Choice::from(y.to_bytes()[0] & 1);
 
                             let y = $base::conditional_select(&y, &-y, ysign ^ sign);
@@ -706,11 +745,12 @@ macro_rules! new_curve_impl {
             }
 
             fn to_curve(&self) -> Self::Curve {
-                $name {
-                    x: self.x,
-                    y: self.y,
-                    z: $base::conditional_select(&$base::one(), &$base::zero(), self.is_identity()),
-                }
+                let tmp = $name {	
+                    x: self.x,	
+                    y: self.y,	
+                    z: $base::one(),	
+                };	
+                $name::conditional_select(&tmp, &$name::identity(), self.is_identity())
             }
         }
 
@@ -742,9 +782,9 @@ macro_rules! new_curve_impl {
             type CurveExt = $name;
 
             fn is_on_curve(&self) -> Choice {
-                // y^2 - x^3 - ax ?= b
-                (self.y.square() - self.x.square() * self.x).ct_eq(&$name::curve_constant_b())
-                    | self.is_identity()
+               // y^2 - x^3 - ax ?= b
+               (self.y.square() - self.x.square() * self.x - $name::curve_constant_a() * self.x).ct_eq(&$name::curve_constant_b())
+               | self.is_identity()
             }
 
             fn coordinates(&self) -> CtOption<Coordinates<Self>> {
@@ -759,7 +799,7 @@ macro_rules! new_curve_impl {
             }
 
             fn a() -> Self::Base {
-                Self::Base::zero()
+                $name::curve_constant_a()
             }
 
             fn b() -> Self::Base {
@@ -811,43 +851,55 @@ macro_rules! new_curve_impl {
             type Output = $name;
 
             fn add(self, rhs: &'a $name) -> $name {
-                if bool::from(self.is_identity()) {
-                    *rhs
-                } else if bool::from(rhs.is_identity()) {
-                    *self
-                } else {
-                    let z1z1 = self.z.square();
-                    let z2z2 = rhs.z.square();
-                    let u1 = self.x * z2z2;
-                    let u2 = rhs.x * z1z1;
-                    let s1 = self.y * z2z2 * rhs.z;
-                    let s2 = rhs.y * z1z1 * self.z;
+                 // Algorithm 1, https://eprint.iacr.org/2015/1060.pdf
+                 let t0 = self.x * rhs.x;
+                 let t1 = self.y * rhs.y;
+                 let t2 = self.z * rhs.z;
+                 let t3 = self.x + self.y;
+                 let t4 = rhs.x + rhs.y;
+                 let t3 = t3 * t4;
+                 let t4 = t0 + t1;
+                 let t3 = t3 - t4;
+                 let t4 = self.x + self.z;
+                 let t5 = rhs.x + rhs.z;
+                 let t4 = t4 * t5;
+                 let t5 = t0 + t2;
+                 let t4 = t4 - t5;
+                 let t5 = self.y + self.z;
+                 let x3 = rhs.y + rhs.z;
+                 let t5 = t5 * x3;
+                 let x3 = t1 + t2;
+                 let t5 = t5 - x3;
+                 let z3 = $name::curve_constant_a() * t4;
+                 let x3 = $name::mul_by_3b(&t2);
+                 let z3 = x3 + z3;
+                 let x3 = t1 - z3;
+                 let z3 = t1 + z3;
+                 let y3 = x3 * z3;
+                 let t1 = t0 + t0;
+                 let t1 = t1 + t0;
+                 let t2 = $name::curve_constant_a() * t2;
+                 let t4 = $name::mul_by_3b(&t4);
+                 let t1 = t1 + t2;
+                 let t2 = t0 - t2;
+                 let t2 = $name::curve_constant_a() * t2;
+                 let t4 = t4 + t2;
+                 let t0 = t1 * t4;
+                 let y3 = y3 + t0;
+                 let t0 = t5 * t4;
+                 let x3 = t3 * x3;
+                 let x3 = x3 - t0;
+                 let t0 = t3 * t1;
+                 let z3 = t5 * z3;
+                 let z3 = z3 + t0;
+ 
+                 $name {
+                     x: x3,
+                     y: y3,
+                     z: z3,
+                 }
 
-                    if u1 == u2 {
-                        if s1 == s2 {
-                            self.double()
-                        } else {
-                            $name::identity()
-                        }
-                    } else {
-                        let h = u2 - u1;
-                        let i = (h + h).square();
-                        let j = h * i;
-                        let r = s2 - s1;
-                        let r = r + r;
-                        let v = u1 * i;
-                        let x3 = r.square() - j - v - v;
-                        let s1 = s1 * j;
-                        let s1 = s1 + s1;
-                        let y3 = r * (v - x3) - s1;
-                        let z3 = (self.z + rhs.z).square() - z1z1 - z2z2;
-                        let z3 = z3 * h;
 
-                        $name {
-                            x: x3, y: y3, z: z3
-                        }
-                    }
-                }
             }
         }
 
@@ -855,41 +907,48 @@ macro_rules! new_curve_impl {
             type Output = $name;
 
             fn add(self, rhs: &'a $name_affine) -> $name {
-                if bool::from(self.is_identity()) {
-                    rhs.to_curve()
-                } else if bool::from(rhs.is_identity()) {
-                    *self
-                } else {
-                    let z1z1 = self.z.square();
-                    let u2 = rhs.x * z1z1;
-                    let s2 = rhs.y * z1z1 * self.z;
+                // Algorithm 2, https://eprint.iacr.org/2015/1060.pdf
+                let t0 = self.x * rhs.x;
+                let t1 = self.y * rhs.y;
+                let t3 = rhs.x + rhs.y;
+                let t4 = self.x + self.y;
+                let t3 = t3 * t4;
+                let t4 = t0 + t1;
+                let t3 = t3 - t4;
+                let t4 = rhs.x * self.z;
+                let t4 = t4 + self.x;
+                let t5 = rhs.y * self.z;
+                let t5 = t5 + self.y;
+                let z3 = $name::curve_constant_a() * t4;
+                let x3 = $name::mul_by_3b(&self.z);
+                let z3 = x3 + z3;
+                let x3 = t1 - z3;
+                let z3 = t1 + z3;
+                let y3 = x3 * z3;
+                let t1 = t0 + t0;
+                let t1 = t1 + t0;
+                let t2 = $name::curve_constant_a() * self.z;
+                let t4 = $name::mul_by_3b(&t4);
+                let t1 = t1 + t2;
+                let t2 = t0 - t2;
+                let t2 = $name::curve_constant_a() * t2;
+                let t4 = t4 + t2;
+                let t0 = t1 * t4;
+                let y3 = y3 + t0;
+                let t0 = t5 * t4;
+                let x3 = t3 * x3;
+                let x3 = x3 - t0;
+                let t0 = t3 * t1;
+                let z3 = t5 * z3;
+                let z3 = z3 + t0;
 
-                    if self.x == u2 {
-                        if self.y == s2 {
-                            self.double()
-                        } else {
-                            $name::identity()
-                        }
-                    } else {
-                        let h = u2 - self.x;
-                        let hh = h.square();
-                        let i = hh + hh;
-                        let i = i + i;
-                        let j = h * i;
-                        let r = s2 - self.y;
-                        let r = r + r;
-                        let v = self.x * i;
-                        let x3 = r.square() - j - v - v;
-                        let j = self.y * j;
-                        let j = j + j;
-                        let y3 = r * (v - x3) - j;
-                        let z3 = (self.z + h).square() - z1z1 - hh;
+                let tmp = $name{
+                    x: x3,
+                    y: y3,
+                    z: z3,
+                };
 
-                        $name {
-                            x: x3, y: y3, z: z3
-                        }
-                    }
-                }
+                $name::conditional_select(&tmp, self, rhs.is_identity())
             }
         }
 
@@ -966,37 +1025,7 @@ macro_rules! new_curve_impl {
             type Output = $name;
 
             fn add(self, rhs: &'a $name_affine) -> $name {
-                if bool::from(self.is_identity()) {
-                    rhs.to_curve()
-                } else if bool::from(rhs.is_identity()) {
-                    self.to_curve()
-                } else {
-                    if self.x == rhs.x {
-                        if self.y == rhs.y {
-                            self.to_curve().double()
-                        } else {
-                            $name::identity()
-                        }
-                    } else {
-                        let h = rhs.x - self.x;
-                        let hh = h.square();
-                        let i = hh + hh;
-                        let i = i + i;
-                        let j = h * i;
-                        let r = rhs.y - self.y;
-                        let r = r + r;
-                        let v = self.x * i;
-                        let x3 = r.square() - j - v - v;
-                        let j = self.y * j;
-                        let j = j + j;
-                        let y3 = r * (v - x3) - j;
-                        let z3 = h + h;
-
-                        $name {
-                            x: x3, y: y3, z: z3
-                        }
-                    }
-                }
+                rhs.to_curve() + self.to_curve()
             }
         }
 

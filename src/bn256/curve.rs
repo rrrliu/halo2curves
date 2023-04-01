@@ -29,6 +29,7 @@ new_curve_impl!(
     Fq,
     Fr,
     (G1_GENERATOR_X,G1_GENERATOR_Y),
+    G1_A,
     G1_B,
     "bn256_g1",
 );
@@ -42,6 +43,7 @@ new_curve_impl!(
     Fq2,
     Fr,
     (G2_GENERATOR_X, G2_GENERATOR_Y),
+    G2_A,
     G2_B,
     "bn256_g2",
 );
@@ -64,7 +66,9 @@ impl CurveAffineExt for G2Affine {
 
 const G1_GENERATOR_X: Fq = Fq::one();
 const G1_GENERATOR_Y: Fq = Fq::from_raw([2, 0, 0, 0]);
+const G1_A: Fq = Fq::from_raw([0, 0, 0, 0]);
 const G1_B: Fq = Fq::from_raw([3, 0, 0, 0]);
+
 const ENDO_G1: [u64; 4] = [
     0x7a7bd9d4391eb18du64,
     0x4ccef014a773d2cfu64,
@@ -81,6 +85,10 @@ const ENDO_BETA: Fr = Fr::from_raw([
     0x0u64,
 ]);
 
+const G2_A: Fq2 = Fq2 {
+    c0: Fq::from_raw([0, 0, 0, 0]),
+    c1: Fq::from_raw([0, 0, 0, 0]),
+};
 const G2_B: Fq2 = Fq2 {
     c0: Fq::from_raw([
         0x3267e6dc24a138e5,
